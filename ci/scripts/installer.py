@@ -91,7 +91,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--force", action="store_true", help="reinstalar aunque la version coincida")
     parser.add_argument("--no-smoke", action="store_true", help="omitir el smoke test de --version")
     parser.add_argument("--stage-dir", help="directorio persistente para descarga/extraccion (util en CI)")
-    parser.add_argument("--keep-archive", action="store_true", help="conservar el archivo descargado")
     parser.add_argument("--version", action="version", version="kiro-termux-installer 1.0.0")
     return parser.parse_args(argv)
 
@@ -418,7 +417,12 @@ def install_binaries(extracted: dict[str, pathlib.Path], lock: dict, args: argpa
         shutil.rmtree(backup, ignore_errors=True)
 
 
-def stage_and_validate(args: argparse.Namespace, tmp: pathlib.Path) -> tuple[dict, dict, str, dict[str, pathlib.Path]]:
+def cleanup_stage(work: pathlib.Path, args: argparse.Namespace) -> None:
+    if not args.stage_dir:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def stage_and_validate(args: argparse.Namespace, tmp: pathlib.Path) -> tuple[dict, dict, str, dict[str, pathlib.Path], pathlib.Path]:
     lock = load_lock(args, tmp)
     kind, art = select_artifact(args, lock)
     if args.stage_dir:
@@ -426,26 +430,30 @@ def stage_and_validate(args: argparse.Namespace, tmp: pathlib.Path) -> tuple[dic
         work.mkdir(parents=True, exist_ok=True)
     else:
         work = pathlib.Path(tempfile.mkdtemp(prefix="kiro-stage.", dir=tmp))
-    if args.asset:
-        source = pathlib.Path(args.asset)
-        if not source.is_file():
-            fail(f"No existe --asset: {source}")
-        archive = work / art["file"]
-        shutil.copyfile(source, archive)
-    else:
-        url = archive_url(lock, art)
-        info(f"Artefacto: {url} ({art['size']} bytes)")
-        archive = download(url, work / art["file"], art["size"])
-    if archive.stat().st_size != art["size"]:
-        fail(f"tamano invalido: {archive.stat().st_size} != {art['size']}")
-    info("Verificando sha256...")
-    actual = sha256_file(archive)
-    if actual != art["sha256"]:
-        fail(f"checksum invalido: {actual} != {art['sha256']}")
-    info("Extrayendo binarios...")
-    extracted = extract_members(archive, kind, lock["archive_members"], work / "extract")
-    validate_binaries(extracted, lock)
-    return lock, art, kind, extracted
+    try:
+        if args.asset:
+            source = pathlib.Path(args.asset)
+            if not source.is_file():
+                fail(f"No existe --asset: {source}")
+            archive = work / art["file"]
+            shutil.copyfile(source, archive)
+        else:
+            url = archive_url(lock, art)
+            info(f"Artefacto: {url} ({art['size']} bytes)")
+            archive = download(url, work / art["file"], art["size"])
+        if archive.stat().st_size != art["size"]:
+            fail(f"tamano invalido: {archive.stat().st_size} != {art['size']}")
+        info("Verificando sha256...")
+        actual = sha256_file(archive)
+        if actual != art["sha256"]:
+            fail(f"checksum invalido: {actual} != {art['sha256']}")
+        info("Extrayendo binarios...")
+        extracted = extract_members(archive, kind, lock["archive_members"], work / "extract")
+        validate_binaries(extracted, lock)
+    except BaseException:
+        cleanup_stage(work, args)
+        raise
+    return lock, art, kind, extracted, work
 
 
 def command_install(args: argparse.Namespace, tmp: pathlib.Path) -> None:
@@ -456,31 +464,37 @@ def command_install(args: argparse.Namespace, tmp: pathlib.Path) -> None:
         if receipt.get("version") == lock["version"] and not args.dry_run:
             info(f"Kiro CLI {lock['version']} ya esta instalado (usa --force para reinstalar)")
             return
-    lock, art, kind, extracted = stage_and_validate(args, tmp)
-    if args.dry_run:
-        info("[ok] Dry-run valido: checksum, extraccion y ELF estatico aarch64.")
-        return
-    if not args.yes:
-        if not sys.stdin.isatty():
-            fail("Entrada no interactiva; usa --yes")
-        if input(f"Instalar Kiro CLI {lock['version']} en {args.dest or prefix/'bin'}? [s/N] ").lower() not in ("s", "si", "y", "yes"):
+    lock, art, kind, extracted, work = stage_and_validate(args, tmp)
+    try:
+        if args.dry_run:
+            info("[ok] Dry-run valido: checksum, extraccion y ELF estatico aarch64.")
             return
-    install_binaries(extracted, lock, args, tmp)
-    if not args.no_smoke:
-        dest = pathlib.Path(args.dest or prefix / "bin")
-        smoke(dest / "kiro-cli", lock["version"])
+        if not args.yes:
+            if not sys.stdin.isatty():
+                fail("Entrada no interactiva; usa --yes")
+            if input(f"Instalar Kiro CLI {lock['version']} en {args.dest or prefix/'bin'}? [s/N] ").lower() not in ("s", "si", "y", "yes"):
+                return
+        install_binaries(extracted, lock, args, tmp)
+        if not args.no_smoke:
+            dest = pathlib.Path(args.dest or prefix / "bin")
+            smoke(dest / "kiro-cli", lock["version"])
+    finally:
+        cleanup_stage(work, args)
 
 
 def command_verify(args: argparse.Namespace, tmp: pathlib.Path) -> None:
-    lock, art, kind, extracted = stage_and_validate(args, tmp)
-    launcher_member = f"kirocli/bin/{BINARY_PREFIX}"
-    launcher = extracted.get(launcher_member)
-    ok = True
-    if launcher is not None and not args.no_smoke:
-        ok = smoke(launcher, lock["version"])
-    if launcher is not None:
-        info(f"Launcher extraido: {launcher}")
-    info("[ok] verify completo" if ok else "[!] verify con fallos")
+    lock, art, kind, extracted, work = stage_and_validate(args, tmp)
+    try:
+        launcher_member = f"kirocli/bin/{BINARY_PREFIX}"
+        launcher = extracted.get(launcher_member)
+        ok = True
+        if launcher is not None and not args.no_smoke:
+            ok = smoke(launcher, lock["version"])
+        if launcher is not None:
+            info(f"Launcher extraido: {launcher}")
+        info("[ok] verify completo" if ok else "[!] verify con fallos")
+    finally:
+        cleanup_stage(work, args)
     raise SystemExit(0 if ok else 1)
 
 

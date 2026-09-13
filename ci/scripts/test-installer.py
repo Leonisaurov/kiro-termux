@@ -162,6 +162,16 @@ class InstallerTests(unittest.TestCase):
         for name in EXECUTABLES:
             self.assertFalse((self.prefix / "bin" / name).exists())
 
+    def test_stage_is_cleaned_up(self) -> None:
+        scratch = self.tmp / "scratch"
+        scratch.mkdir()
+        result = run_installer([
+            "install", "--lock", str(self.lock_path), "--asset", str(self.archive),
+            "--prefix", str(self.prefix), "--yes", "--no-smoke",
+        ], env={"TMPDIR": str(scratch)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list(scratch.iterdir()), [])
+
     def test_manifest_output(self) -> None:
         result = run_installer(["manifest", "--lock", str(self.lock_path), "--asset", str(self.archive)])
         self.assertEqual(result.returncode, 0, result.stderr)
