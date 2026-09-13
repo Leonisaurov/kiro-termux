@@ -33,10 +33,21 @@ DEFAULT_PREFIX = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
 DEFAULT_TMP = os.environ.get("TMPDIR", "/data/data/com.termux/files/usr/tmp")
 DEFAULT_LOCK_URL = f"https://raw.githubusercontent.com/{REPO}/{REF}/ci/upstream/kiro-cli.lock.json"
 BINARY_PREFIX = "kiro-cli"
-RECEIPT_REL = "lib/kiro-termux/receipt.json"
+LIBEXEC_REL = "libexec/kiro-termux"
+CONF_REL = "etc/kiro-termux"
+RECEIPT_REL = "etc/kiro-termux/receipt.json"
+RESOLV_REL = "etc/kiro-termux/resolv.conf"
 CHUNK = 1 << 20
+SCAN_CHUNK = 8 << 20
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 SUPPORTED_ARCHIVES = ("tar.xz", "tar.zst", "tar.gz", "zip")
+# musl lee /etc/resolv.conf, que en Android no existe (solo hay /system/etc, de
+# solo lectura) y hace fallback a 127.0.0.1:53. Redirigimos esa ruta al fd 9,
+# que el wrapper abre sobre un resolv.conf que si controlamos.
+RESOLV_MARKER = b"/etc/resolv.conf\x00"
+RESOLV_REPLACEMENT = b"/proc/self/fd/9\x00"
+RESOLV_FD = 9
+DEFAULT_NAMESERVERS = ("8.8.8.8", "8.8.4.4", "1.1.1.1")
 
 
 def fail(message: str) -> "None":
@@ -84,7 +95,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--archive", choices=("auto",) + SUPPORTED_ARCHIVES, default="auto",
                         help="formato de archivo a descargar (por defecto: el del lock)")
     parser.add_argument("--prefix", default=DEFAULT_PREFIX, help=f"prefijo Termux (default: {DEFAULT_PREFIX})")
-    parser.add_argument("--dest", help="directorio destino de los binarios (por defecto: <prefix>/bin)")
+    parser.add_argument("--dest", help="directorio de los wrappers (por defecto: <prefix>/bin); los binarios reales van a <prefix>/libexec/kiro-termux")
     parser.add_argument("--asset", help="artefacto local o file:// para probar el flujo sin red")
     parser.add_argument("--yes", action="store_true", help="no pedir confirmacion")
     parser.add_argument("--dry-run", action="store_true", help="validar sin instalar")
@@ -342,6 +353,128 @@ def validate_binaries(extracted: dict[str, pathlib.Path], lock: dict) -> None:
         info(f"  [ok] {path.name}: {detail} ({path.stat().st_size} bytes)")
 
 
+def _find_all(path: pathlib.Path, needle: bytes, chunk: int = SCAN_CHUNK) -> list[int]:
+    """Offsets de todas las apariciones de `needle`, leyendo por bloques."""
+    offsets: list[int] = []
+    overlap = len(needle) - 1
+    base = 0
+    tail = b""
+    with open(path, "rb") as handle:
+        while True:
+            block = handle.read(chunk)
+            if not block:
+                break
+            buffer = tail + block
+            cursor = 0
+            while True:
+                found = buffer.find(needle, cursor)
+                if found < 0:
+                    break
+                offsets.append(base - len(tail) + found)
+                cursor = found + 1
+            tail = buffer[-overlap:] if overlap else b""
+            base += len(block)
+    return offsets
+
+
+def patch_resolv_conf(path: pathlib.Path) -> int:
+    """Redirige la ruta de musl /etc/resolv.conf al fd heredado (/proc/self/fd/9)."""
+    offsets = _find_all(path, RESOLV_MARKER)
+    if not offsets:
+        fail(
+            f"{path.name}: no se encontro la ruta {RESOLV_MARKER[:-1].decode()}; "
+            "el upstream cambio el enlazado estatico de musl"
+        )
+    replacement = RESOLV_REPLACEMENT + b"\x00" * (len(RESOLV_MARKER) - len(RESOLV_REPLACEMENT))
+    with open(path, "r+b") as handle:
+        for offset in offsets:
+            handle.seek(offset)
+            handle.write(replacement)
+    info(f"  [ok] {path.name}: {len(offsets)} ruta(s) resolv.conf -> {RESOLV_REPLACEMENT[:-1].decode()}")
+    return len(offsets)
+
+
+def apply_patches(extracted: dict[str, pathlib.Path], lock: dict) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for member in lock["archive_members"]:
+        path = extracted[member]
+        counts[pathlib.PurePosixPath(member).name] = patch_resolv_conf(path)
+    return counts
+
+
+def parse_nameservers(text: str) -> list[str]:
+    servers: list[str] = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        fields = line.split()
+        if fields and fields[0] == "nameserver" and len(fields) >= 2:
+            address = fields[1]
+            if re.fullmatch(r"[0-9a-fA-F:.]+", address) and address not in servers:
+                servers.append(address)
+    return servers
+
+
+def resolve_nameservers(prefix: pathlib.Path) -> list[str]:
+    override = os.environ.get("KIRO_TERMUX_NAMESERVERS")
+    if override:
+        servers = [item.strip() for item in override.replace(",", " ").split() if item.strip()]
+        if servers:
+            return servers
+    candidates = [
+        prefix / "etc/resolv.conf",
+        pathlib.Path("/system/etc/resolv.conf"),
+        pathlib.Path("/etc/resolv.conf"),
+    ]
+    env_conf = os.environ.get("KIRO_TERMUX_RESOLV")
+    if env_conf:
+        candidates.insert(0, pathlib.Path(env_conf))
+    for candidate in candidates:
+        try:
+            servers = parse_nameservers(candidate.read_text())
+        except OSError:
+            continue
+        if servers:
+            return servers
+    return list(DEFAULT_NAMESERVERS)
+
+
+def write_resolv_conf(prefix: pathlib.Path) -> pathlib.Path:
+    target = prefix / RESOLV_REL
+    target.parent.mkdir(parents=True, exist_ok=True)
+    servers = resolve_nameservers(prefix)
+    lines = ["# generado por kiro-termux: musl no encuentra /etc/resolv.conf en Android"]
+    lines += [f"nameserver {server}" for server in servers]
+    lines.append("options timeout:2 attempts:2 ndots:1")
+    content = "\n".join(lines) + "\n"
+    if not target.is_file() or target.read_text() != content:
+        target.write_text(content)
+    return target
+
+
+def wrapper_script(prefix: pathlib.Path, name: str) -> str:
+    prefix_str = str(prefix)
+    return f"""#!{prefix_str}/bin/sh
+# Wrapper de kiro-termux para {name}. Inyecta las CAs de Termux y un
+# resolv.conf legible por musl (Android no expone /etc/resolv.conf).
+KIRO_PREFIX='{prefix_str}'
+_name="${{0##*/}}"
+_real="$KIRO_PREFIX/{LIBEXEC_REL}/$_name"
+if [ ! -x "$_real" ]; then
+    echo "kiro-termux: falta el binario $_real (reinstala con install.sh)" >&2
+    exit 127
+fi
+: "${{SSL_CERT_FILE:=$KIRO_PREFIX/etc/tls/cert.pem}}"
+export SSL_CERT_FILE
+_resolv="${{KIRO_TERMUX_RESOLV:-$KIRO_PREFIX/{RESOLV_REL}}}"
+if [ -r "$_resolv" ]; then
+    exec {RESOLV_FD}<"$_resolv"
+fi
+exec "$_real" "$@"
+"""
+
+
 def smoke(path: pathlib.Path, expected: str) -> bool:
     try:
         result = subprocess.run([str(path), "--version"], capture_output=True, text=True, timeout=60)
@@ -373,44 +506,66 @@ def current_receipt(prefix: pathlib.Path) -> dict:
     return {}
 
 
-def install_binaries(extracted: dict[str, pathlib.Path], lock: dict, args: argparse.Namespace, tmp: pathlib.Path) -> None:
+def install_binaries(extracted: dict[str, pathlib.Path], lock: dict, patches: dict[str, int],
+                     args: argparse.Namespace, tmp: pathlib.Path) -> None:
     prefix = pathlib.Path(args.prefix)
-    dest = pathlib.Path(args.dest or prefix / "bin")
-    dest.mkdir(parents=True, exist_ok=True)
+    bin_dir = pathlib.Path(args.dest or prefix / "bin")
+    libexec = prefix / LIBEXEC_REL
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    libexec.mkdir(parents=True, exist_ok=True)
     backup = pathlib.Path(tempfile.mkdtemp(prefix="kiro-backup.", dir=tmp))
-    moved: list[tuple[pathlib.Path, pathlib.Path]] = []
-    receipt = receipt_path(prefix)
+    names = [pathlib.PurePosixPath(member).name for member in lock["archive_members"]]
+    installed: list[pathlib.Path] = []
+    saved_map: dict[pathlib.Path, pathlib.Path] = {}
     try:
-        plan = []
+        targets = [bin_dir / name for name in names] + [libexec / name for name in names]
+        for target in targets:
+            if target.exists() or target.is_symlink():
+                saved = backup / str(target.relative_to(prefix))
+                saved.parent.mkdir(parents=True, exist_ok=True)
+                if target.is_symlink():
+                    saved.symlink_to(os.readlink(target))
+                else:
+                    shutil.copy2(target, saved)
+                saved_map[target] = saved
         for member in lock["archive_members"]:
             name = pathlib.PurePosixPath(member).name
-            plan.append((name, extracted[member]))
-        for name, _ in plan:
-            target = dest / name
-            if target.exists():
-                saved = backup / name
-                saved.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(target, saved)
-        for name, source in plan:
-            target = dest / name
-            os.replace(source, target)
+            target = libexec / name
+            os.replace(extracted[member], target)
             target.chmod(0o755)
-            moved.append((target, backup / name))
+            installed.append(target)
+        for name in names:
+            target = bin_dir / name
+            target.write_text(wrapper_script(prefix, name))
+            target.chmod(0o755)
+            installed.append(target)
+        resolv = write_resolv_conf(prefix)
+        receipt = receipt_path(prefix)
         receipt.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "schema": "kiro-termux/receipt/v1",
+            "schema": "kiro-termux/receipt/v2",
             "version": lock["version"],
             "artifact": lock["artifacts"][lock["default_artifact"]]["file"],
-            "executables": [name for name, _ in plan],
-            "dest": str(dest),
+            "executables": names,
+            "wrapper_dir": str(bin_dir),
+            "libexec_dir": str(libexec),
+            "resolv_conf": str(resolv),
+            "resolv_patch": {
+                "marker": RESOLV_MARKER[:-1].decode(),
+                "replacement": RESOLV_REPLACEMENT[:-1].decode(),
+                "counts": patches,
+            },
         }
         receipt.write_text(json.dumps(payload, indent=2) + "\n")
-        info(f"[ok] Instalado Kiro CLI {lock['version']} en {dest}")
+        info(f"[ok] Instalado Kiro CLI {lock['version']}: binarios en {libexec}, wrappers en {bin_dir}")
     except BaseException:
-        for target, saved in reversed(moved):
-            if target.exists():
-                target.unlink()
-            if saved.is_file():
+        for target in installed:
+            target.unlink(missing_ok=True)
+        for target, saved in saved_map.items():
+            if saved.is_symlink():
+                target.unlink(missing_ok=True)
+                target.symlink_to(os.readlink(saved))
+            elif saved.is_file():
                 shutil.copy2(saved, target)
         raise
     finally:
@@ -422,7 +577,25 @@ def cleanup_stage(work: pathlib.Path, args: argparse.Namespace) -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def stage_and_validate(args: argparse.Namespace, tmp: pathlib.Path) -> tuple[dict, dict, str, dict[str, pathlib.Path], pathlib.Path]:
+def warn_shadowing(bin_dir: pathlib.Path) -> None:
+    """Avisa si una copia previa en ~/.local/bin tapa los wrappers en el PATH."""
+    if test_mode():
+        return
+    home = os.environ.get("HOME")
+    if not home:
+        return
+    local = pathlib.Path(home) / ".local/bin"
+    if not (local / "kiro-cli").exists():
+        return
+    parts = os.environ.get("PATH", "").split(os.pathsep)
+    if str(local) in parts and str(bin_dir) in parts and parts.index(str(local)) < parts.index(str(bin_dir)):
+        info(
+            f"[!] {local}/kiro-cli tiene prioridad sobre {bin_dir} en PATH; "
+            f"usa '{bin_dir}/kiro-cli' o elimina la copia previa para usar este port"
+        )
+
+
+def stage_and_validate(args: argparse.Namespace, tmp: pathlib.Path) -> tuple[dict, dict, str, dict[str, pathlib.Path], dict[str, int], pathlib.Path]:
     lock = load_lock(args, tmp)
     kind, art = select_artifact(args, lock)
     if args.stage_dir:
@@ -450,10 +623,12 @@ def stage_and_validate(args: argparse.Namespace, tmp: pathlib.Path) -> tuple[dic
         info("Extrayendo binarios...")
         extracted = extract_members(archive, kind, lock["archive_members"], work / "extract")
         validate_binaries(extracted, lock)
+        info("Parcheando el resolv.conf de musl...")
+        patches = apply_patches(extracted, lock)
     except BaseException:
         cleanup_stage(work, args)
         raise
-    return lock, art, kind, extracted, work
+    return lock, art, kind, extracted, patches, work
 
 
 def command_install(args: argparse.Namespace, tmp: pathlib.Path) -> None:
@@ -464,26 +639,27 @@ def command_install(args: argparse.Namespace, tmp: pathlib.Path) -> None:
         if receipt.get("version") == lock["version"] and not args.dry_run:
             info(f"Kiro CLI {lock['version']} ya esta instalado (usa --force para reinstalar)")
             return
-    lock, art, kind, extracted, work = stage_and_validate(args, tmp)
+    lock, art, kind, extracted, patches, work = stage_and_validate(args, tmp)
     try:
         if args.dry_run:
-            info("[ok] Dry-run valido: checksum, extraccion y ELF estatico aarch64.")
+            info("[ok] Dry-run valido: checksum, extraccion, ELF estatico aarch64 y parche resolv.conf.")
             return
         if not args.yes:
             if not sys.stdin.isatty():
                 fail("Entrada no interactiva; usa --yes")
             if input(f"Instalar Kiro CLI {lock['version']} en {args.dest or prefix/'bin'}? [s/N] ").lower() not in ("s", "si", "y", "yes"):
                 return
-        install_binaries(extracted, lock, args, tmp)
+        bin_dir = pathlib.Path(args.dest or prefix / "bin")
+        install_binaries(extracted, lock, patches, args, tmp)
+        warn_shadowing(bin_dir)
         if not args.no_smoke:
-            dest = pathlib.Path(args.dest or prefix / "bin")
-            smoke(dest / "kiro-cli", lock["version"])
+            smoke(bin_dir / "kiro-cli", lock["version"])
     finally:
         cleanup_stage(work, args)
 
 
 def command_verify(args: argparse.Namespace, tmp: pathlib.Path) -> None:
-    lock, art, kind, extracted, work = stage_and_validate(args, tmp)
+    lock, art, kind, extracted, patches, work = stage_and_validate(args, tmp)
     try:
         launcher_member = f"kirocli/bin/{BINARY_PREFIX}"
         launcher = extracted.get(launcher_member)
@@ -492,6 +668,9 @@ def command_verify(args: argparse.Namespace, tmp: pathlib.Path) -> None:
             ok = smoke(launcher, lock["version"])
         if launcher is not None:
             info(f"Launcher extraido: {launcher}")
+        if patches.get(BINARY_PREFIX, 0) < 1:
+            info("[!] el parche resolv.conf no quedo aplicado")
+            ok = False
         info("[ok] verify completo" if ok else "[!] verify con fallos")
     finally:
         cleanup_stage(work, args)
@@ -517,14 +696,21 @@ def command_manifest(args: argparse.Namespace, tmp: pathlib.Path) -> None:
 def command_uninstall(args: argparse.Namespace, tmp: pathlib.Path) -> None:
     prefix = pathlib.Path(args.prefix)
     receipt = current_receipt(prefix)
-    dest = pathlib.Path(args.dest or prefix / "bin")
-    names = receipt.get("executables") or [pathlib.PurePosixPath(m).name for m in ("kiro-cli", "kiro-cli-chat", "kiro-cli-term")]
+    bin_dir = pathlib.Path(args.dest or receipt.get("wrapper_dir") or prefix / "bin")
+    libexec = pathlib.Path(receipt.get("libexec_dir") or prefix / LIBEXEC_REL)
+    names = receipt.get("executables") or ["kiro-cli", "kiro-cli-chat", "kiro-cli-term"]
     for name in names:
-        target = dest / name
-        if target.is_file():
-            target.unlink()
-            info(f"Eliminado {target}")
-    receipt_path(prefix).unlink(missing_ok=True)
+        for target in (bin_dir / name, libexec / name):
+            if target.is_file() or target.is_symlink():
+                target.unlink()
+                info(f"Eliminado {target}")
+    for path in (receipt_path(prefix), prefix / RESOLV_REL, prefix / "lib/kiro-termux/receipt.json"):
+        path.unlink(missing_ok=True)
+    for directory in (prefix / CONF_REL, libexec, prefix / "lib/kiro-termux"):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
     info("[ok] Desinstalado.")
 
 

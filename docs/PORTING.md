@@ -58,19 +58,62 @@ una alternativa (`--archive tar.gz`).
 ## 4. Layout de instalacion
 
 ```text
-$PREFIX/bin/kiro-cli          binario real (no symlink)
+$PREFIX/bin/kiro-cli                    wrapper (shell) -> libexec
 $PREFIX/bin/kiro-cli-chat
 $PREFIX/bin/kiro-cli-term
-$PREFIX/lib/kiro-termux/receipt.json
+$PREFIX/libexec/kiro-termux/kiro-cli    binario real (parcheado)
+$PREFIX/libexec/kiro-termux/kiro-cli-chat
+$PREFIX/libexec/kiro-termux/kiro-cli-term
+$PREFIX/etc/kiro-termux/resolv.conf     DNS para musl
+$PREFIX/etc/kiro-termux/receipt.json    recibo
 ```
 
-Los tres binarios viven en el mismo directorio que espera el launcher para
-localizar a sus hermanos (`kiro-cli-chat`, `kiro-cli-term`), evitando depender de
-como resuelva `current_exe`/`argv[0]`.
+Los tres binarios reales viven juntos en `libexec` para que el launcher
+encuentre a sus hermanos (`kiro-cli-chat`, `kiro-cli-term`) sin depender de como
+resuelva `current_exe`/`argv[0]`. Los wrappers de `$PREFIX/bin` hacen de
+lanzadera.
 
-La instalacion es transaccional: se respaldan los binarios previos, se hace
-`os.replace` y, ante cualquier error, se restauran. El recibo permite un
-`uninstall` exacto.
+La instalacion es transaccional: se respaldan los binarios/wrappers previos, se
+hace `os.replace`/escritura y, ante cualquier error, se restauran. El recibo
+permite un `uninstall` exacto (incluye el layout legado).
+
+## 4b. Red: CAs y DNS (los dos bloqueos reales de Android)
+
+Al correr el binario musl estatico aparecen dos fallos distintos:
+
+1. `no native root CA certificates found!` -> `rustls-native-certs` no encuentra
+   `/etc/ssl/certs/...`. Se resuelve con `SSL_CERT_FILE=$PREFIX/etc/tls/cert.pem`.
+2. `error sending request for url (...)` -> musl abre `/etc/resolv.conf` (que no
+   existe: Android usa `/system/etc`, de solo lectura), no lee ningun
+   nameserver y hace fallback a `127.0.0.1:53`. `strace` lo confirma:
+
+   ```text
+   openat("/etc/hosts", O_RDONLY) = 19
+   openat("/etc/resolv.conf", O_RDONLY) = -1 ENOENT
+   sendto(..., sin_port=htons(53), sin_addr=inet_addr("127.0.0.1"))
+   ```
+
+No se puede crear `/etc/resolv.conf` (particion de sistema, sin root) ni usar
+`unshare -Urm` (Android deshabilita los user namespaces). Soluciones evaluadas:
+
+- `RESOLV_CONF`: musl no lo soporta.
+- nameserver en `127.0.0.1:53`: requeriria root para el puerto 53.
+- `/etc/hosts` parcheado: fragil (IPs dinamicas).
+- `proot`: funciona, pero agrega una dependencia que el port evita.
+
+Solucion del port: **parchear la cadena `/etc/resolv.conf` del binario** (una vez
+en `kiro-cli`/`kiro-cli-term`, cuatro en `kiro-cli-chat`) por
+`/proc/self/fd/9\0` (`kiro-termux/upstream-lock/v1` no cambia). Los wrappers
+abren `$PREFIX/etc/kiro-termux/resolv.conf` en el **fd 9** y luego `exec`an al
+binario real, que al abrir `/proc/self/fd/9` obtiene ese archivo. El fd 9 queda
+ocupado desde el arranque, asi que el asignador no lo reutiliza.
+
+`apply_patches()` escanea por bloques (sin cargar los ~1 GB en RAM) y falla en
+voz alta si la cadena no aparece, de modo que un cambio de musl en upstream se
+detecta en CI en vez de romper en silencio. El `resolv.conf` se genera a partir
+de `$PREFIX/etc/resolv.conf` / `/system/etc/resolv.conf` o, en su defecto,
+`8.8.8.8`, `8.8.4.4`, `1.1.1.1`; se puede overridear con
+`KIRO_TERMUX_NAMESERVERS` o `KIRO_TERMUX_RESOLV`.
 
 ## 5. Por que no se usa el `install.sh` upstream
 

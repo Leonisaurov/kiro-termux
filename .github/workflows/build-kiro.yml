@@ -93,15 +93,31 @@ jobs:
       - name: Install into a temporary prefix
         env:
           KIRO_TERMUX_TEST_MODE: '1'
+          PREFIX_DIR: ${{ runner.temp }}/kiro-prefix
         run: |
           python3 ci/scripts/installer.py install \
             --lock ci/upstream/kiro-cli.lock.json \
             --archive "$ARCHIVE" \
             --stage-dir "$RUNNER_TEMP/stage" \
-            --prefix "$RUNNER_TEMP/prefix" \
+            --prefix "$PREFIX_DIR" \
             --yes --no-smoke
-          test -x "$RUNNER_TEMP/prefix/bin/kiro-cli"
-          test -f "$RUNNER_TEMP/prefix/lib/kiro-termux/receipt.json"
+          test -x "$PREFIX_DIR/bin/kiro-cli"
+          test -x "$PREFIX_DIR/libexec/kiro-termux/kiro-cli"
+          test -f "$PREFIX_DIR/etc/kiro-termux/receipt.json"
+          grep -aq "/proc/self/fd/9" "$PREFIX_DIR/libexec/kiro-termux/kiro-cli"
+
+      - name: Smoke test installed wrapper under QEMU
+        env:
+          PREFIX_DIR: ${{ runner.temp }}/kiro-prefix
+        run: |
+          set -euo pipefail
+          mkdir -p "$PREFIX_DIR/bin"
+          ln -sf /bin/sh "$PREFIX_DIR/bin/sh"
+          output="$(docker run --rm --platform linux/arm64 \
+            -v "$PREFIX_DIR:$PREFIX_DIR" -w "$PREFIX_DIR" alpine:3.20 \
+            "$PREFIX_DIR/bin/kiro-cli" --version)"
+          echo "wrapper smoke: $output"
+          echo "$output" | grep -q "kiro-cli"
 
       - name: Package installer bundle
         run: |

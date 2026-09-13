@@ -16,6 +16,10 @@ No introduzcas compilacion de Kiro: no existe toolchain ni codigo fuente upstrea
   `patchelf`.
 - **No** ejecutar el `install.sh` interno del archivo upstream: asume glibc y es
   interactivo. El contrato es extraer los tres binarios y validarlos.
+- El port **parchea** la cadena `/etc/resolv.conf` de musl a `/proc/self/fd/9` e
+  instala wrappers que abren el `resolv.conf` en el fd 9 y exportan
+  `SSL_CERT_FILE`. No cambies el layout a "binarios reales directos en `bin`":
+  rompe DNS/CAs en Android. Los binarios reales van en `libexec/kiro-termux`.
 - El **lock** (`ci/upstream/kiro-cli.lock.json`) es la fuente de verdad de la
   version y los SHA-256. Cambiarlo solo con `ci/scripts/upstream.py update` o un
   PR explicito; nunca "alinear" versiones por inferencia.

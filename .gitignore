@@ -12,3 +12,5 @@ stage/
 .DS_Store
 .idea/
 .vscode/
+
+err.log

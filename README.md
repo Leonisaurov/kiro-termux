@@ -41,27 +41,62 @@ python3 ci/scripts/installer.py install --dry-run --yes
 python3 ci/scripts/installer.py uninstall
 ```
 
-El instalador instala `kiro-cli`, `kiro-cli-chat` y `kiro-cli-term` en `$PREFIX/bin`,
-valida que cada uno sea un `ELF 64-bit aarch64` sin `PT_INTERP`/`PT_DYNAMIC`
-(es decir, estatico), deja un recibo en `$PREFIX/lib/kiro-termux/receipt.json` y
-hace rollback si algo falla.
+El instalador:
+
+1. descarga el artefacto oficial fijado por SHA-256 y lo valida,
+2. comprueba que cada binario sea un `ELF 64-bit aarch64` estatico
+   (sin `PT_INTERP`/`PT_DYNAMIC`),
+3. **parchea la ruta `/etc/resolv.conf` de musl** para que apunte al fd heredado
+   `/proc/self/fd/9` (ver [Red](#red-dns-y-certificados)),
+4. instala los binarios reales en `$PREFIX/libexec/kiro-termux/` y deja
+   **wrappers** en `$PREFIX/bin/`, y
+5. genera `$PREFIX/etc/kiro-termux/{resolv.conf,receipt.json}`.
+
+Todo es transaccional (rollback) y el recibo permite desinstalar.
 
 No ejecuta el instalador de upstream: aquel asume `glibc`, valida versiones de
 libc y lanza `kiro-cli setup` (interactivo). Tampoco toca `~/.kiro` ni tus dotfiles.
 
+## Red (DNS y certificados)
+
+Los binarios son musl estatico. En Android eso rompe dos cosas que el port
+resuelve en los wrappers:
+
+- **Certificados**: `rustls-native-certs` busca `/etc/ssl/certs/...`, que no
+  existe. El wrapper exporta `SSL_CERT_FILE=$PREFIX/etc/tls/cert.pem`
+  (paquete `ca-certificates`).
+- **DNS**: musl lee `/etc/resolv.conf`, que Android no expone (solo
+  `/system/etc`, de solo lectura); al no encontrarlo manda las consultas a
+  `127.0.0.1:53` y falla con `error sending request for url (...)` o
+  `no native root CA certificates found!`. El instalador parchea la cadena
+  `/etc/resolv.conf` del binario a `/proc/self/fd/9`, que el wrapper abre sobre
+  `$PREFIX/etc/kiro-termux/resolv.conf`.
+
+Override de DNS si tu red bloquea los resolvers por defecto:
+
+```sh
+# solo para una sesion
+KIRO_TERMUX_NAMESERVERS="1.1.1.1 9.9.9.9" kiro-cli login
+
+# o crea tu propio resolv.conf y apuntalo
+KIRO_TERMUX_RESOLV=/ruta/resolv.conf kiro-cli login
+```
+
 ## Uso
 
 ```sh
-kiro-cli                 # chat interactivo (TUI)
-kiro-cli chat            # idem
-kiro-cli --classic       # interfaz clasica
-kiro-cli login           # autenticacion (AWS Builder ID / Google / GitHub)
-kiro-cli doctor          # diagnostico
-kiro-cli --help-all      # todos los subcomandos
+kiro-cli                        # chat interactivo (TUI)
+kiro-cli chat                   # idem
+kiro-cli --classic              # interfaz clasica
+kiro-cli login                  # autenticacion (AWS Builder ID / Google / GitHub)
+kiro-cli login --use-device-flow  # si el navegador no puede redirigir a Termux
+kiro-cli doctor                 # diagnostico
+kiro-cli --help-all             # todos los subcomandos
 ```
 
 El arranque inicial `--version` funciona sin red. El chat y el login requieren
-conexion y credenciales de Kiro.
+conexion y credenciales de Kiro. En Termux suele funcionar mejor
+`kiro-cli login --use-device-flow` (te da un codigo para pegar en el navegador).
 
 ## Avisos
 

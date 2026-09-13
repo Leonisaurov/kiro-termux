@@ -45,7 +45,7 @@ def fake_static_aarch64(size: int = 1_100_000) -> bytes:
     header[56:58] = (1).to_bytes(2, "little")
     phdr = bytearray(56)
     phdr[0:4] = (1).to_bytes(4, "little")
-    payload = bytes(header) + bytes(phdr)
+    payload = bytes(header) + bytes(phdr) + b"\x00\x00" + installer.RESOLV_MARKER
     return payload + b"\x00" * (size - len(payload))
 
 
@@ -121,11 +121,19 @@ class InstallerTests(unittest.TestCase):
         ])
         self.assertEqual(result.returncode, 0, result.stderr)
         for name in EXECUTABLES:
-            target = self.prefix / "bin" / name
-            self.assertTrue(target.is_file(), name)
-            self.assertTrue(os.access(target, os.X_OK))
-        receipt = json.loads((self.prefix / "lib/kiro-termux/receipt.json").read_text())
+            wrapper = self.prefix / "bin" / name
+            real = self.prefix / "libexec/kiro-termux" / name
+            self.assertTrue(wrapper.is_file(), name)
+            self.assertTrue(os.access(wrapper, os.X_OK))
+            self.assertTrue(real.is_file(), name)
+            self.assertTrue(os.access(real, os.X_OK))
+            data = real.read_bytes()
+            self.assertIn(installer.RESOLV_REPLACEMENT, data)
+            self.assertNotIn(installer.RESOLV_MARKER, data)
+        self.assertTrue((self.prefix / "etc/kiro-termux/resolv.conf").is_file())
+        receipt = json.loads((self.prefix / "etc/kiro-termux/receipt.json").read_text())
         self.assertEqual(receipt["version"], "9.9.9")
+        self.assertEqual(receipt["resolv_patch"]["counts"]["kiro-cli"], 1)
 
     def test_idempotent_without_force(self) -> None:
         args = ["install", "--lock", str(self.lock_path), "--asset", str(self.archive),
@@ -161,6 +169,8 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         for name in EXECUTABLES:
             self.assertFalse((self.prefix / "bin" / name).exists())
+            self.assertFalse((self.prefix / "libexec/kiro-termux" / name).exists())
+        self.assertFalse((self.prefix / "etc/kiro-termux/receipt.json").exists())
 
     def test_stage_is_cleaned_up(self) -> None:
         scratch = self.tmp / "scratch"
@@ -188,6 +198,22 @@ class ExtractionTests(unittest.TestCase):
             build_tar_xz(archive, {"../evil": b"x"})
             with self.assertRaises(SystemExit):
                 installer.extract_members(archive, "tar.xz", ["../evil"], tmp / "out")
+
+    def test_patch_requires_resolv_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = pathlib.Path(raw)
+            binary = tmp / "kiro-cli"
+            binary.write_bytes(fake_static_aarch64().replace(installer.RESOLV_MARKER, b"\x00" * len(installer.RESOLV_MARKER)))
+            with self.assertRaises(SystemExit):
+                installer.patch_resolv_conf(binary)
+
+    def test_patch_replaces_every_occurrence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            binary = pathlib.Path(raw) / "kiro-cli"
+            binary.write_bytes(fake_static_aarch64() + b"\x00\x00" + installer.RESOLV_MARKER + b"\x00" * 16)
+            count = installer.patch_resolv_conf(binary)
+            self.assertEqual(count, 2)
+            self.assertNotIn(installer.RESOLV_MARKER, binary.read_bytes())
 
     def test_rejects_symlink_member(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
