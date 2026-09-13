@@ -20,9 +20,15 @@ No introduzcas compilacion de Kiro: no existe toolchain ni codigo fuente upstrea
   instala wrappers que abren el `resolv.conf` en el fd 9 y exportan
   `SSL_CERT_FILE`. No cambies el layout a "binarios reales directos en `bin`":
   rompe DNS/CAs en Android. Los binarios reales van en `libexec/kiro-termux`.
+- La TUI de Kiro es un bundle Bun: `kiro-cli-chat` embebe un Bun glibc que no
+  arranca en Android. El instalador embebe el **Bun Android de
+  `../opencode-termux`** (fijado en `runtime` del lock) sustituyendo el blob ELF
+  glibc con padding. No quites ese paso: sin el, el login funciona pero la TUI
+  muere con `No such file or directory (os error 2)`.
 - El **lock** (`ci/upstream/kiro-cli.lock.json`) es la fuente de verdad de la
-  version y los SHA-256. Cambiarlo solo con `ci/scripts/upstream.py update` o un
-  PR explicito; nunca "alinear" versiones por inferencia.
+  version y los SHA-256 (incluido el runtime Bun). Cambiarlo solo con
+  `ci/scripts/upstream.py update` o un PR explicito; nunca "alinear" versiones
+  por inferencia.
 - Los binarios se descargan del servidor oficial de AWS (`prod.download.cli.kiro.dev`)
   y se verifican por SHA-256; no se re-hospedan en releases.
 - Usa `$TMPDIR`, nunca `/tmp` en scripts de Termux. `install.sh` y los scripts

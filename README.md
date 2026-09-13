@@ -48,9 +48,13 @@ El instalador:
    (sin `PT_INTERP`/`PT_DYNAMIC`),
 3. **parchea la ruta `/etc/resolv.conf` de musl** para que apunte al fd heredado
    `/proc/self/fd/9` (ver [Red](#red-dns-y-certificados)),
-4. instala los binarios reales en `$PREFIX/libexec/kiro-termux/` y deja
+4. descarga el **runtime Bun Android** de
+   [opencode-termux](https://github.com/Leonisaurov/opencode-termux) y lo
+   **embebe en `kiro-cli-chat`**, sustituyendo el Bun glibc que trae Kiro
+   (ver [TUI y Bun](#tui-y-bun)),
+5. instala los binarios reales en `$PREFIX/libexec/kiro-termux/` y deja
    **wrappers** en `$PREFIX/bin/`, y
-5. genera `$PREFIX/etc/kiro-termux/{resolv.conf,receipt.json}`.
+6. genera `$PREFIX/etc/kiro-termux/{resolv.conf,receipt.json}`.
 
 Todo es transaccional (rollback) y el recibo permite desinstalar.
 
@@ -81,6 +85,25 @@ KIRO_TERMUX_NAMESERVERS="1.1.1.1 9.9.9.9" kiro-cli login
 # o crea tu propio resolv.conf y apuntalo
 KIRO_TERMUX_RESOLV=/ruta/resolv.conf kiro-cli login
 ```
+
+## TUI y Bun
+
+La interfaz interactiva de Kiro no es nativa: `kiro-cli-chat` embebe un runtime
+**Bun** (glibc, con `interpreter /lib/ld-linux-aarch64.so.1`) mas el bundle
+`tui.js` (tambien embebido), y al arrancar los extrae a
+`~/.local/share/kiro-cli/` y ejecuta `bun tui.js`. Ese Bun glibc no arranca en
+Android (`error: No such file or directory (os error 2)`).
+
+El port resuelve esto embebiendo el **Bun Android (bionic)** de opencode-termux
+en lugar del glibc: el instalador localiza el blob ELF embebido, lo sustituye
+por el Bun Android con padding de ceros hasta la misma longitud y verifica el
+SHA-256 resultante. Kiro extrae entonces un Bun que si corre en Termux
+(probado con 1.2.13 del release `stack-v1.18.11` de `opencode-termux`).
+
+- Runtime fijado en `ci/upstream/kiro-cli.lock.json` (`runtime`), con URL y
+  SHA-256 del artefacto de opencode-termux.
+- El parche se describe en `embedded_bun` y queda registrado en el recibo
+  (`patches.embedded_bun`) con offset, tamano y sha256.
 
 ## Uso
 

@@ -108,12 +108,47 @@ abren `$PREFIX/etc/kiro-termux/resolv.conf` en el **fd 9** y luego `exec`an al
 binario real, que al abrir `/proc/self/fd/9` obtiene ese archivo. El fd 9 queda
 ocupado desde el arranque, asi que el asignador no lo reutiliza.
 
-`apply_patches()` escanea por bloques (sin cargar los ~1 GB en RAM) y falla en
-voz alta si la cadena no aparece, de modo que un cambio de musl en upstream se
-detecta en CI en vez de romper en silencio. El `resolv.conf` se genera a partir
-de `$PREFIX/etc/resolv.conf` / `/system/etc/resolv.conf` o, en su defecto,
-`8.8.8.8`, `8.8.4.4`, `1.1.1.1`; se puede overridear con
+`apply_resolv_patches()` escanea por bloques (sin cargar los ~1 GB en RAM) y
+falla en voz alta si la cadena no aparece, de modo que un cambio de musl en
+upstream se detecta en CI en vez de romper en silencio. El `resolv.conf` se
+genera a partir de `$PREFIX/etc/resolv.conf` / `/system/etc/resolv.conf` o, en su
+defecto, `8.8.8.8`, `8.8.4.4`, `1.1.1.1`; se puede overridear con
 `KIRO_TERMUX_NAMESERVERS` o `KIRO_TERMUX_RESOLV`.
+
+## 4c. La TUI es Bun (y en Android no arranca)
+
+`kiro-cli-chat` **no renderiza la TUI por si mismo**. Es un binario estatico que
+embebe dos blobs:
+
+```text
+"Extracting bun and tui to: "  <ELF glibc de Bun>   (blob, ~101 MB)
+<hash>                         <tui.js>             (bundle Bun de ~13 MB)
+```
+
+y en runtime los escribe en `$HOME/.local/share/kiro-cli/{bun,tui.js}` y ejecuta
+`bun tui.js`. El Bun embebido es **glibc**
+(`interpreter /lib/ld-linux-aarch64.so.1`), asi que en Android falla con
+`error: No such file or directory (os error 2)` justo despues del login. Los
+`<hash>` son los ficheros `bun.sha256`/`tui.js.sha256` que Kiro usa como marca
+para saltarse la extraccion si ya existen.
+
+Port: se usa el **Bun Android (bionic)** que compila
+[opencode-termux](https://github.com/Leonisaurov/opencode-termux)
+(`bun-1.2.13-android-aarch64.tar.gz`, fijado por SHA-256 en `runtime`). El
+instalador:
+
+1. localiza el blob con el patron `Extracting bun and tui to: ` seguido de un
+   ELF aarch64 con `PT_INTERP` glibc;
+2. calcula su longitud a partir de la propia cabecera ELF
+   (`e_shoff + e_shentsize * e_shnum`), asi que no depende de offsets fijos;
+3. escribe el Bun Android con padding de ceros hasta esa longitud (el cargador
+   ignora los bytes finales) y
+4. registra offset/tamano/sha256 en el recibo.
+
+Como Kiro extrae el blob tal cual y no valida su contenido contra el hash de la
+tabla (el `bun.sha256` en disco ya no coincide con el blob extraido en el
+binario original), la sustitucion sobrevive a cada extraccion. Si el marker
+desaparece en una version futura, `verify`/`install` fallan en CI.
 
 ## 5. Por que no se usa el `install.sh` upstream
 

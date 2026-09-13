@@ -63,11 +63,14 @@ jobs:
           import json, os
           lock = json.load(open('ci/upstream/kiro-cli.lock.json'))
           art = lock['artifacts'][lock['default_artifact']]
+          runtime = lock.get('runtime') or {}
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write(f"version={lock['version']}\n")
               out.write(f"artifact={art['file']}\n")
               out.write(f"sha256={art['sha256']}\n")
               out.write(f"size={art['size']}\n")
+              out.write(f"bun_version={runtime.get('version', 'n/a')}\n")
+              out.write(f"bun_sha256={runtime.get('sha256', 'n/a')}\n")
           PY
 
       - name: Download, verify and extract artifact
@@ -105,6 +108,26 @@ jobs:
           test -x "$PREFIX_DIR/libexec/kiro-termux/kiro-cli"
           test -f "$PREFIX_DIR/etc/kiro-termux/receipt.json"
           grep -aq "/proc/self/fd/9" "$PREFIX_DIR/libexec/kiro-termux/kiro-cli"
+          grep -aq "/system/bin/linker64" "$PREFIX_DIR/libexec/kiro-termux/kiro-cli-chat"
+
+      - name: Verify embedded Bun patch
+        env:
+          PREFIX_DIR: ${{ runner.temp }}/kiro-prefix
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          prefix = pathlib.Path(os.environ["PREFIX_DIR"])
+          receipt = json.loads((prefix / "etc/kiro-termux/receipt.json").read_text())
+          embedded = receipt["patches"]["embedded_bun"]
+          assert embedded["counts"]["kiro-cli-chat"] >= 1, embedded
+          blob = embedded["blobs"]["kiro-cli-chat"][0]
+          with open(prefix / "libexec/kiro-termux/kiro-cli-chat", "rb") as handle:
+              handle.seek(blob["offset"])
+              data = handle.read(blob["size"])
+          assert hashlib.sha256(data).hexdigest() == blob["sha256"], "blob sha256 mismatch"
+          assert b"/system/bin/linker64" in data, "blob is not the Android Bun"
+          print(f"embedded Bun {embedded['version']} ok ({blob['size']} bytes)")
+          PY
 
       - name: Smoke test installed wrapper under QEMU
         env:
@@ -132,6 +155,9 @@ jobs:
           # Kiro CLI ${VERSION} para Termux (aarch64)
 
           Empaquetado del binario oficial **estatico musl** de Kiro CLI para Termux/Android.
+          La TUI usa el runtime **Bun Android** de
+          [opencode-termux](https://github.com/Leonisaurov/opencode-termux), embebido en
+          \`kiro-cli-chat\` por el instalador.
 
           ## Instalacion
 
@@ -144,6 +170,7 @@ jobs:
           - Version upstream: \`${VERSION}\`
           - Archivo: \`${{ steps.lock.outputs.artifact }}\`
           - sha256: \`${{ steps.lock.outputs.sha256 }}\`
+          - Runtime Bun: \`${{ steps.lock.outputs.bun_version }}\` (\`${{ steps.lock.outputs.bun_sha256 }}\`)
           - Smoke test (qemu aarch64): \`${SMOKE}\`
           EOF
           tar -czf "dist/kiro-termux-installer-${VERSION}.tar.gz" -C dist install.sh ci

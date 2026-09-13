@@ -30,6 +30,25 @@
     "kirocli/bin/kiro-cli-term"
   ],
   "default_artifact": "tar.xz",
+  "runtime": {
+    "product": "bun",
+    "version": "1.2.13",
+    "kind": "android-aarch64",
+    "source_repo": "Leonisaurov/opencode-termux",
+    "source_release": "stack-v1.18.11",
+    "asset": "bun-1.2.13-android-aarch64.tar.gz",
+    "url": "https://github.com/Leonisaurov/opencode-termux/releases/download/stack-v1.18.11/bun-1.2.13-android-aarch64.tar.gz",
+    "sha256": "d0e4e049492bded5d115c4ce4434b9016f559b5f01c61a6ebf2ae2e9b6ddc147",
+    "size": 35625370,
+    "member": "bun",
+    "interpreter": "/system/bin/linker64",
+    "target_triple": "aarch64-linux-android24"
+  },
+  "embedded_bun": {
+    "marker": "Extracting bun and tui to: ",
+    "interpreter": "/lib/ld-linux-aarch64.so.1",
+    "required_binary": "kiro-cli-chat"
+  },
   "artifacts": {
     "tar.xz": {
       "file": "kirocli-aarch64-linux-musl.tar.xz",

@@ -48,6 +48,11 @@ RESOLV_MARKER = b"/etc/resolv.conf\x00"
 RESOLV_REPLACEMENT = b"/proc/self/fd/9\x00"
 RESOLV_FD = 9
 DEFAULT_NAMESERVERS = ("8.8.8.8", "8.8.4.4", "1.1.1.1")
+# Kiro embebe su runtime Bun (glibc) y el bundle tui.js en kiro-cli-chat. El port
+# sustituye ese blob por un Bun Android (bionic) para que la TUI arranque.
+DEFAULT_BUN_MARKER = b"Extracting bun and tui to: "
+DEFAULT_BUN_INTERP = b"/lib/ld-linux-aarch64.so.1"
+BUN_MEMBER = "bun"
 
 
 def fail(message: str) -> "None":
@@ -176,6 +181,26 @@ def validate_lock(data: dict) -> dict:
     members = data.get("archive_members")
     if not isinstance(members, list) or not members:
         fail("archive_members invalidos")
+    runtime = data.get("runtime")
+    if runtime is not None:
+        if not isinstance(runtime, dict):
+            fail("runtime del lock invalido")
+        if not isinstance(runtime.get("url"), str) or (not test_mode() and not runtime["url"].startswith("https://")):
+            fail("runtime.url debe ser HTTPS")
+        if not HEX64.fullmatch(str(runtime.get("sha256", ""))):
+            fail("runtime.sha256 invalido")
+        if not isinstance(runtime.get("size"), int) or runtime["size"] <= 0:
+            fail("runtime.size invalido")
+        if not isinstance(runtime.get("member"), str) or not runtime["member"]:
+            fail("runtime.member invalido")
+    embedded = data.get("embedded_bun")
+    if embedded is not None:
+        if not isinstance(embedded, dict):
+            fail("embedded_bun del lock invalido")
+        if not isinstance(embedded.get("marker"), str) or not embedded["marker"]:
+            fail("embedded_bun.marker invalido")
+        if not isinstance(embedded.get("interpreter"), str) or not embedded["interpreter"]:
+            fail("embedded_bun.interpreter invalido")
     return data
 
 
@@ -394,12 +419,140 @@ def patch_resolv_conf(path: pathlib.Path) -> int:
     return len(offsets)
 
 
-def apply_patches(extracted: dict[str, pathlib.Path], lock: dict) -> dict[str, int]:
+def apply_resolv_patches(extracted: dict[str, pathlib.Path], lock: dict) -> dict[str, int]:
     counts: dict[str, int] = {}
     for member in lock["archive_members"]:
         path = extracted[member]
         counts[pathlib.PurePosixPath(member).name] = patch_resolv_conf(path)
     return counts
+
+
+def elf_program_info(path: pathlib.Path, base: int) -> tuple[int, bytes, int] | None:
+    """(machine, interpreter, tamano del blob) de un ELF ubicado en `base`."""
+    with open(path, "rb") as handle:
+        handle.seek(base)
+        head = handle.read(64)
+        if head[:4] != b"\x7fELF" or head[4] != 2:
+            return None
+        machine = int.from_bytes(head[18:20], "little")
+        phoff = int.from_bytes(head[32:40], "little")
+        phentsize = int.from_bytes(head[54:56], "little")
+        phnum = int.from_bytes(head[56:58], "little")
+        e_shoff = int.from_bytes(head[40:48], "little")
+        e_shentsize = int.from_bytes(head[58:60], "little")
+        e_shnum = int.from_bytes(head[60:62], "little")
+        handle.seek(base + phoff)
+        table = handle.read(phentsize * phnum)
+        interpreter = b""
+        for index in range(phnum):
+            entry = table[index * phentsize:(index + 1) * phentsize]
+            if len(entry) < 36:
+                break
+            if int.from_bytes(entry[0:4], "little") == 3:
+                offset = int.from_bytes(entry[8:16], "little")
+                size = int.from_bytes(entry[32:40], "little")
+                handle.seek(base + offset)
+                interpreter = handle.read(size)
+        blob_size = e_shoff + e_shentsize * e_shnum
+        return machine, interpreter, blob_size
+
+
+def extract_bun(archive: pathlib.Path, member: str, dest: pathlib.Path) -> pathlib.Path:
+    target = dest / "bun"
+    with tarfile.open(archive, "r:*") as tar:
+        for entry in tar:
+            if not entry.isfile() or pathlib.PurePosixPath(entry.name).name != member:
+                continue
+            source = tar.extractfile(entry)
+            if source is None:
+                fail(f"no se puede leer {entry.name} del runtime Bun")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with source, open(target, "wb") as out:
+                shutil.copyfileobj(source, out, CHUNK)
+            target.chmod(0o755)
+            return target
+    fail(f"el runtime Bun no contiene el miembro '{member}'")
+
+
+def validate_android_bun(path: pathlib.Path, expected_interp: str) -> str:
+    ok, detail = elf_is_static_aarch64(path)
+    with open(path, "rb") as handle:
+        head = handle.read(64)
+    machine = int.from_bytes(head[18:20], "little")
+    if machine != 0xB7:
+        fail(f"runtime Bun: no es aarch64 ({detail})")
+    info_tuple = elf_program_info(path, 0)
+    if info_tuple is None:
+        fail("runtime Bun: ELF invalido")
+    _, interpreter, _ = info_tuple
+    text = interpreter.decode("utf-8", "replace")
+    if expected_interp not in text:
+        fail(f"runtime Bun: interpreter {text!r} no incluye {expected_interp!r} (no es Android/bionic)")
+    if ok:
+        fail("runtime Bun: es estatico; se esperaba bionic (linker64)")
+    return text
+
+
+def patch_embedded_bun(path: pathlib.Path, bun: bytes, marker: bytes, expected_interp: bytes) -> list[dict]:
+    """Sustituye el blob del Bun glibc embebido por el Bun Android (con padding)."""
+    patched: list[dict] = []
+    for offset in _find_all(path, marker):
+        info_tuple = elf_program_info(path, offset + len(marker))
+        if info_tuple is None:
+            continue
+        machine, interpreter, blob_size = info_tuple
+        if machine != 0xB7 or expected_interp not in interpreter:
+            continue
+        if blob_size < len(bun):
+            fail(f"{path.name}: el blob embebido ({blob_size}) es menor que el Bun Android ({len(bun)})")
+        padded = bun + b"\x00" * (blob_size - len(bun))
+        with open(path, "r+b") as handle:
+            handle.seek(offset + len(marker))
+            handle.write(padded)
+        patched.append({
+            "offset": offset + len(marker),
+            "size": blob_size,
+            "sha256": hashlib.sha256(padded).hexdigest(),
+        })
+    return patched
+
+
+def load_runtime(lock: dict, work: pathlib.Path) -> tuple[pathlib.Path, dict]:
+    runtime = lock.get("runtime")
+    if not runtime:
+        fail("el lock no define un runtime Bun Android")
+    asset = runtime.get("asset") or pathlib.PurePosixPath(urllib.parse.urlparse(runtime["url"]).path).name or "bun-runtime.tar.gz"
+    archive = work / asset
+    info(f"Runtime Bun: {runtime['url']} ({runtime['size']} bytes)")
+    download(runtime["url"], archive, runtime["size"])
+    if archive.stat().st_size != runtime["size"]:
+        fail(f"runtime Bun: tamano invalido {archive.stat().st_size} != {runtime['size']}")
+    actual = sha256_file(archive)
+    if actual != runtime["sha256"]:
+        fail(f"runtime Bun: checksum invalido {actual} != {runtime['sha256']}")
+    bun = extract_bun(archive, runtime["member"], work / "runtime")
+    interpreter = validate_android_bun(bun, runtime["interpreter"])
+    info(f"  [ok] runtime Bun {runtime['version']} ({interpreter})")
+    return bun, runtime
+
+
+def apply_bun_runtime(extracted: dict[str, pathlib.Path], lock: dict, bun: pathlib.Path) -> dict:
+    embedded = lock.get("embedded_bun") or {}
+    marker = str(embedded.get("marker", DEFAULT_BUN_MARKER.decode())).encode()
+    expected = str(embedded.get("interpreter", DEFAULT_BUN_INTERP.decode())).encode()
+    required = embedded.get("required_binary", BINARY_PREFIX + "-chat")
+    payload = bun.read_bytes()
+    counts: dict[str, int] = {}
+    blobs: dict[str, list[dict]] = {}
+    for member in lock["archive_members"]:
+        name = pathlib.PurePosixPath(member).name
+        blobs[name] = patch_embedded_bun(extracted[member], payload, marker, expected)
+        counts[name] = len(blobs[name])
+        if counts[name]:
+            info(f"  [ok] {name}: Bun Android embebido en {counts[name]} blob(s)")
+    if counts.get(required, 0) < 1:
+        fail(f"{required}: no se encontro el Bun glibc embebido ({marker[:-1].decode()!r})")
+    return {"counts": counts, "blobs": blobs}
 
 
 def parse_nameservers(text: str) -> list[str]:
@@ -550,11 +703,7 @@ def install_binaries(extracted: dict[str, pathlib.Path], lock: dict, patches: di
             "wrapper_dir": str(bin_dir),
             "libexec_dir": str(libexec),
             "resolv_conf": str(resolv),
-            "resolv_patch": {
-                "marker": RESOLV_MARKER[:-1].decode(),
-                "replacement": RESOLV_REPLACEMENT[:-1].decode(),
-                "counts": patches,
-            },
+            "patches": patches,
         }
         receipt.write_text(json.dumps(payload, indent=2) + "\n")
         info(f"[ok] Instalado Kiro CLI {lock['version']}: binarios en {libexec}, wrappers en {bin_dir}")
@@ -624,7 +773,25 @@ def stage_and_validate(args: argparse.Namespace, tmp: pathlib.Path) -> tuple[dic
         extracted = extract_members(archive, kind, lock["archive_members"], work / "extract")
         validate_binaries(extracted, lock)
         info("Parcheando el resolv.conf de musl...")
-        patches = apply_patches(extracted, lock)
+        resolv_counts = apply_resolv_patches(extracted, lock)
+        patches = {
+            "resolv_conf": {
+                "marker": RESOLV_MARKER[:-1].decode(),
+                "replacement": RESOLV_REPLACEMENT[:-1].decode(),
+                "counts": resolv_counts,
+            }
+        }
+        if lock.get("runtime"):
+            bun, runtime = load_runtime(lock, work)
+            info("Embebiendo el runtime Bun Android...")
+            applied = apply_bun_runtime(extracted, lock, bun)
+            patches["embedded_bun"] = {
+                "marker": str((lock.get("embedded_bun") or {}).get("marker", DEFAULT_BUN_MARKER.decode())),
+                "version": runtime.get("version"),
+                "sha256": runtime.get("sha256"),
+                "counts": applied["counts"],
+                "blobs": applied["blobs"],
+            }
     except BaseException:
         cleanup_stage(work, args)
         raise
@@ -668,9 +835,15 @@ def command_verify(args: argparse.Namespace, tmp: pathlib.Path) -> None:
             ok = smoke(launcher, lock["version"])
         if launcher is not None:
             info(f"Launcher extraido: {launcher}")
-        if patches.get(BINARY_PREFIX, 0) < 1:
+        if patches["resolv_conf"]["counts"].get(BINARY_PREFIX, 0) < 1:
             info("[!] el parche resolv.conf no quedo aplicado")
             ok = False
+        embedded = patches.get("embedded_bun")
+        if embedded is not None:
+            required = (lock.get("embedded_bun") or {}).get("required_binary", f"{BINARY_PREFIX}-chat")
+            if embedded["counts"].get(required, 0) < 1:
+                info(f"[!] el Bun Android no quedo embebido en {required}")
+                ok = False
         info("[ok] verify completo" if ok else "[!] verify con fallos")
     finally:
         cleanup_stage(work, args)
@@ -689,6 +862,8 @@ def command_manifest(args: argparse.Namespace, tmp: pathlib.Path) -> None:
         "artifact": {"kind": kind, **art},
         "url": archive_url(lock, art),
         "executables": lock["executables"],
+        "runtime": lock.get("runtime"),
+        "embedded_bun": lock.get("embedded_bun"),
     }
     print(json.dumps(payload, indent=2))
 
