@@ -91,6 +91,8 @@ jobs:
           echo "SMOKE=$output" >> "$GITHUB_ENV"
 
       - name: Install into a temporary prefix
+        env:
+          KIRO_TERMUX_TEST_MODE: '1'
         run: |
           python3 ci/scripts/installer.py install \
             --lock ci/upstream/kiro-cli.lock.json \
