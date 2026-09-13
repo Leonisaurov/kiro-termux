@@ -1,0 +1,68 @@
+name: Sync upstream Kiro CLI
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Check and update pin
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check for upstream updates
+        id: check
+        run: |
+          status="$(python3 ci/scripts/upstream.py status)"
+          echo "$status"
+          echo "$status" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("update=" + str(d["update_available"]).lower()); print("upstream=" + d["upstream_version"])' >> "$GITHUB_OUTPUT"
+
+      - name: Refresh lock
+        if: steps.check.outputs.update == 'true'
+        run: python3 ci/scripts/upstream.py update
+
+      - name: Verify refreshed lock
+        if: steps.check.outputs.update == 'true'
+        run: |
+          python3 ci/scripts/upstream.py verify
+          python3 ci/scripts/test-installer.py
+
+      - name: Open pull request
+        if: steps.check.outputs.update == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.upstream }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          branch="chore/sync-kiro-cli-${VERSION}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            echo "La rama $branch ya existe; no se crea otro PR."
+            exit 0
+          fi
+          git checkout -b "$branch"
+          git add ci/upstream/kiro-cli.lock.json
+          git commit -m "chore(upstream): sync kiro-cli ${VERSION}"
+          git push -u origin "$branch"
+          gh pr create \
+            --title "chore(upstream): sync kiro-cli ${VERSION}" \
+            --body "Actualiza el pin de Kiro CLI a la version upstream ${VERSION}. CI de validacion y build debe pasar antes de mergear." \
+            --base main --head "$branch"

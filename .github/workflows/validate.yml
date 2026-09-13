@@ -1,0 +1,49 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: Static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python syntax
+        run: python3 -m py_compile ci/scripts/*.py
+
+      - name: Shell syntax
+        run: bash -n install.sh ci/scripts/env.sh ci/scripts/ci-summary.sh
+
+      - name: Unit tests
+        run: python3 ci/scripts/test-installer.py
+
+      - name: Validate lock
+        run: python3 ci/scripts/installer.py manifest --lock ci/upstream/kiro-cli.lock.json > /dev/null
+
+      - name: Verify lock against upstream manifest
+        run: python3 ci/scripts/upstream.py verify
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: false
+
+      - name: actionlint
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          "$(go env GOPATH)/bin/actionlint" -color
