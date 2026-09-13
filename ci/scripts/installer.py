@@ -52,6 +52,27 @@ def test_mode() -> bool:
     return os.environ.get("KIRO_TERMUX_TEST_MODE") == "1"
 
 
+def resolve_tmp() -> pathlib.Path:
+    """Primer directorio temporal escribible: TMPDIR, el de Termux o el del sistema."""
+    candidates = []
+    if os.environ.get("TMPDIR"):
+        candidates.append(pathlib.Path(os.environ["TMPDIR"]))
+    candidates.append(pathlib.Path(DEFAULT_TMP))
+    candidates.append(pathlib.Path(tempfile.gettempdir()))
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            continue
+        if os.access(candidate, os.W_OK):
+            return candidate
+    fail("No hay un TMPDIR escribible; exporta TMPDIR a un directorio con permiso de escritura")
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="kiro-termux-installer",
@@ -82,13 +103,8 @@ def preflight(args: argparse.Namespace) -> pathlib.Path:
             fail("Este instalador requiere Termux/Android")
         if os.uname().machine not in ("aarch64", "arm64"):
             fail(f"Arquitectura no soportada: {os.uname().machine}")
-    tmp = pathlib.Path(DEFAULT_TMP)
-    if not test_mode() and not os.access(tmp.parent, os.W_OK):
-        tmp = pathlib.Path(tempfile.gettempdir())
-        os.environ["TMPDIR"] = str(tmp)
-    tmp.mkdir(parents=True, exist_ok=True)
-    if not os.access(tmp, os.W_OK):
-        fail(f"TMPDIR no escribible: {tmp}")
+    tmp = resolve_tmp()
+    os.environ["TMPDIR"] = str(tmp)
     if args.command in ("install",) and not args.dry_run:
         dest = pathlib.Path(args.dest or pathlib.Path(args.prefix) / "bin")
         try:
