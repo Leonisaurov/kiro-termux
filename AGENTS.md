@@ -16,10 +16,11 @@ No introduzcas compilacion de Kiro: no existe toolchain ni codigo fuente upstrea
   `patchelf`.
 - **No** ejecutar el `install.sh` interno del archivo upstream: asume glibc y es
   interactivo. El contrato es extraer los tres binarios y validarlos.
-- El port **parchea** la cadena `/etc/resolv.conf` de musl a `/proc/self/fd/9` e
-  instala wrappers que abren el `resolv.conf` en el fd 9 y exportan
-  `SSL_CERT_FILE`. No cambies el layout a "binarios reales directos en `bin`":
-  rompe DNS/CAs en Android. Los binarios reales van en `libexec/kiro-termux`.
+- El port **parchea** la cadena `/etc/resolv.conf` de musl a una ruta real corta
+  (`$PREFIX/etc/r`) y los wrappers exportan `SSL_CERT_FILE`. No uses un fd
+  heredado: el hijo `acp` no hereda fds y reutiliza el fd 9. No cambies el layout
+  a "binarios reales directos en `bin`": rompe DNS/CAs en Android. Los binarios
+  reales van en `libexec/kiro-termux`.
 - La TUI de Kiro es un bundle Bun: `kiro-cli-chat` embebe un Bun glibc que no
   arranca en Android. El instalador embebe el **Bun Android de
   `../opencode-termux`** (fijado en `runtime` del lock) sustituyendo el blob ELF

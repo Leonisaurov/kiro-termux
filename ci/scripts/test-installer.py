@@ -19,6 +19,10 @@ REPO_ROOT = HERE.parents[1]
 INSTALLER = HERE / "installer.py"
 UPSTREAM = HERE / "upstream.py"
 EXECUTABLES = ("kiro-cli", "kiro-cli-chat", "kiro-cli-term")
+# Literales que musl guarda justo despues de la ruta /etc/resolv.conf. La ruta
+# parcheada puede ocupar hasta el inicio de "nameserver".
+MUSL_RESOLV_LAYOUT = b"options\x00ndots:\x00attempts:\x00timeout:\x00nameserver\x00domain\x00search\x00"
+TERMUX_PREFIX = pathlib.Path("/data/data/com.termux/files/usr")
 
 
 def load_module(path: pathlib.Path, name: str):
@@ -76,7 +80,7 @@ def fake_static_aarch64(size: int = 1_400_000, with_bun: bool = True) -> bytes:
     header[56:58] = (1).to_bytes(2, "little")
     phdr = bytearray(56)
     phdr[0:4] = (1).to_bytes(4, "little")
-    payload = bytes(header) + bytes(phdr) + b"\x00\x00" + installer.RESOLV_MARKER
+    payload = bytes(header) + bytes(phdr) + b"\x00\x00" + installer.RESOLV_MARKER + MUSL_RESOLV_LAYOUT
     if with_bun:
         payload += installer.DEFAULT_BUN_MARKER + fake_glibc_bun()
     return payload + b"\x00" * (size - len(payload))
@@ -164,11 +168,14 @@ def run_installer(args: list[str], env: dict | None = None) -> subprocess.Comple
 
 class InstallerTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="kiro-test."))
+        # La ruta parcheada en el binario debe caber antes de "nameserver", asi
+        # que el prefijo de prueba debe ser corto (Termux: $PREFIX; CI: /tmp).
+        base = TERMUX_PREFIX if TERMUX_PREFIX.is_dir() else pathlib.Path(tempfile.gettempdir())
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="kt.", dir=base))
         self.archive, self.lock = make_archive(self.tmp)
         self.lock_path = self.tmp / "lock.json"
         self.lock_path.write_text(json.dumps(self.lock))
-        self.prefix = self.tmp / "usr"
+        self.prefix = self.tmp
 
     def tearDown(self) -> None:
         import shutil
@@ -189,13 +196,13 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue(real.is_file(), name)
             self.assertTrue(os.access(real, os.X_OK))
             data = real.read_bytes()
-            self.assertIn(installer.RESOLV_REPLACEMENT, data)
             self.assertNotIn(installer.RESOLV_MARKER, data)
+            self.assertIn(str(self.prefix / "etc/r").encode(), data)
         chat = (self.prefix / "libexec/kiro-termux" / "kiro-cli-chat").read_bytes()
         padded = fake_android_bun() + b"\x00" * (len(fake_glibc_bun()) - len(fake_android_bun()))
         self.assertIn(padded, chat)
         self.assertNotIn(installer.DEFAULT_BUN_MARKER + fake_glibc_bun(), chat)
-        self.assertTrue((self.prefix / "etc/kiro-termux/resolv.conf").is_file())
+        self.assertTrue((self.prefix / "etc/r").is_file())
         receipt = json.loads((self.prefix / "etc/kiro-termux/receipt.json").read_text())
         self.assertEqual(receipt["version"], "9.9.9")
         self.assertEqual(receipt["patches"]["resolv_conf"]["counts"]["kiro-cli"], 1)
@@ -264,7 +271,7 @@ class InstallerTests(unittest.TestCase):
         lock_path.write_text(json.dumps(lock))
         result = run_installer([
             "install", "--lock", str(lock_path), "--asset", str(archive),
-            "--prefix", str(self.tmp / "usr2"), "--yes", "--no-smoke",
+            "--prefix", str(self.tmp), "--yes", "--no-smoke",
         ])
         self.assertEqual(result.returncode, 1)
         self.assertIn("no se encontro el Bun glibc embebido", result.stderr)
@@ -285,15 +292,24 @@ class ExtractionTests(unittest.TestCase):
             binary = tmp / "kiro-cli"
             binary.write_bytes(fake_static_aarch64().replace(installer.RESOLV_MARKER, b"\x00" * len(installer.RESOLV_MARKER)))
             with self.assertRaises(SystemExit):
-                installer.patch_resolv_conf(binary)
+                installer.patch_resolv_conf(binary, pathlib.Path("/tmp/kr"))
 
     def test_patch_replaces_every_occurrence(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             binary = pathlib.Path(raw) / "kiro-cli"
-            binary.write_bytes(fake_static_aarch64() + b"\x00\x00" + installer.RESOLV_MARKER + b"\x00" * 16)
-            count = installer.patch_resolv_conf(binary)
+            binary.write_bytes(fake_static_aarch64() + b"\x00\x00" + installer.RESOLV_MARKER + MUSL_RESOLV_LAYOUT)
+            count = installer.patch_resolv_conf(binary, pathlib.Path("/tmp/kr"))
             self.assertEqual(count, 2)
-            self.assertNotIn(installer.RESOLV_MARKER, binary.read_bytes())
+            data = binary.read_bytes()
+            self.assertNotIn(installer.RESOLV_MARKER, data)
+            self.assertEqual(data.count(b"/tmp/kr\x00"), 2)
+
+    def test_patch_resolv_path_too_long(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            binary = pathlib.Path(raw) / "kiro-cli"
+            binary.write_bytes(fake_static_aarch64())
+            with self.assertRaises(SystemExit):
+                installer.patch_resolv_conf(binary, pathlib.Path("/" + "x" * 80))
 
     def test_embedded_bun_patch(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

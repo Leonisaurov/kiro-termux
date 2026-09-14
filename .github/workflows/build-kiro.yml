@@ -106,8 +106,9 @@ jobs:
             --yes --no-smoke
           test -x "$PREFIX_DIR/bin/kiro-cli"
           test -x "$PREFIX_DIR/libexec/kiro-termux/kiro-cli"
+          test -f "$PREFIX_DIR/etc/r"
           test -f "$PREFIX_DIR/etc/kiro-termux/receipt.json"
-          grep -aq "/proc/self/fd/9" "$PREFIX_DIR/libexec/kiro-termux/kiro-cli"
+          grep -aqF "$PREFIX_DIR/etc/r" "$PREFIX_DIR/libexec/kiro-termux/kiro-cli"
           grep -aq "/system/bin/linker64" "$PREFIX_DIR/libexec/kiro-termux/kiro-cli-chat"
 
       - name: Verify embedded Bun patch

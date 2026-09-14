@@ -46,8 +46,9 @@ El instalador:
 1. descarga el artefacto oficial fijado por SHA-256 y lo valida,
 2. comprueba que cada binario sea un `ELF 64-bit aarch64` estatico
    (sin `PT_INTERP`/`PT_DYNAMIC`),
-3. **parchea la ruta `/etc/resolv.conf` de musl** para que apunte al fd heredado
-   `/proc/self/fd/9` (ver [Red](#red-dns-y-certificados)),
+3. **parchea la ruta `/etc/resolv.conf` de musl** hacia un fichero real y corto
+   (`$PREFIX/etc/r`), reescribiendo la ruta y los literales que le siguen hasta
+   `nameserver` (ver [Red](#red-dns-y-certificados)),
 4. descarga el **runtime Bun Android** de
    [opencode-termux](https://github.com/Leonisaurov/opencode-termux) y lo
    **embebe en `kiro-cli-chat`**, sustituyendo el Bun glibc que trae Kiro
@@ -73,17 +74,20 @@ resuelve en los wrappers:
   `/system/etc`, de solo lectura); al no encontrarlo manda las consultas a
   `127.0.0.1:53` y falla con `error sending request for url (...)` o
   `no native root CA certificates found!`. El instalador parchea la cadena
-  `/etc/resolv.conf` del binario a `/proc/self/fd/9`, que el wrapper abre sobre
-  `$PREFIX/etc/kiro-termux/resolv.conf`.
+  `/etc/resolv.conf` del binario hacia `$PREFIX/etc/r` (una ruta real y corta):
+  reescribe la ruta y los literales de musl que le siguen
+  (`options`/`ndots:`/`attempts:`/`timeout:`) justo hasta `nameserver`.
 
-Override de DNS si tu red bloquea los resolvers por defecto:
+Se usa un fichero real (no un fd heredado) porque el subproceso `kiro-cli-chat
+acp` que lanza la TUI **no hereda fds** y reutiliza el fd 9 para sus logs, con lo
+que perdia el resolv.conf y todas las peticiones fallaban.
+
+El instalador genera `$PREFIX/etc/r` a partir de `$PREFIX/etc/resolv.conf`,
+`/system/etc/resolv.conf` o, en su defecto, `8.8.8.8`/`8.8.4.4`/`1.1.1.1`.
+Puedes forzar los resolvers al instalar:
 
 ```sh
-# solo para una sesion
-KIRO_TERMUX_NAMESERVERS="1.1.1.1 9.9.9.9" kiro-cli login
-
-# o crea tu propio resolv.conf y apuntalo
-KIRO_TERMUX_RESOLV=/ruta/resolv.conf kiro-cli login
+KIRO_TERMUX_NAMESERVERS="1.1.1.1 9.9.9.9" ./install.sh --force --yes
 ```
 
 ## TUI y Bun

@@ -93,27 +93,34 @@ Al correr el binario musl estatico aparecen dos fallos distintos:
    sendto(..., sin_port=htons(53), sin_addr=inet_addr("127.0.0.1"))
    ```
 
-No se puede crear `/etc/resolv.conf` (particion de sistema, sin root) ni usar
-`unshare -Urm` (Android deshabilita los user namespaces). Soluciones evaluadas:
+No se puede crear `/etc/resolv.conf` (particion de sistema, sin root),
+`unshare -Urm` esta deshabilitado (Android desactiva los user namespaces) y
+`LD_PRELOAD` no aplica a binarios estaticos. Soluciones evaluadas:
 
 - `RESOLV_CONF`: musl no lo soporta.
 - nameserver en `127.0.0.1:53`: requeriria root para el puerto 53.
 - `/etc/hosts` parcheado: fragil (IPs dinamicas).
+- `/sdcard/...`: permiso de almacenamiento y scoped storage, no portable.
 - `proot`: funciona, pero agrega una dependencia que el port evita.
+- **fd heredado `/proc/self/fd/9`**: falla con la TUI. El subproceso
+  `kiro-cli-chat acp` que lanza Bun **no hereda el fd 9** y lo reutiliza para su
+  propio log; musl lee entonces el log como resolv.conf, cae a `127.0.0.1:53` y
+  todas las peticiones de la TUI (`/model`, mensajes) fallan con `dispatch
+  failure`.
 
-Solucion del port: **parchear la cadena `/etc/resolv.conf` del binario** (una vez
-en `kiro-cli`/`kiro-cli-term`, cuatro en `kiro-cli-chat`) por
-`/proc/self/fd/9\0` (`kiro-termux/upstream-lock/v1` no cambia). Los wrappers
-abren `$PREFIX/etc/kiro-termux/resolv.conf` en el **fd 9** y luego `exec`an al
-binario real, que al abrir `/proc/self/fd/9` obtiene ese archivo. El fd 9 queda
-ocupado desde el arranque, asi que el asignador no lo reutiliza.
+Solucion del port: **parchear la ruta `/etc/resolv.conf` de musl a una ruta real
+y corta** (`$PREFIX/etc/r`). En el binario, esa ruta precede a los literales
+`options`, `ndots:`, `attempts:`, `timeout:` y `nameserver`. Se reescriben la
+ruta y esos cuatro literales (hasta justo antes de `nameserver`, que musl
+necesita para parsear) con la ruta nueva. La ruta debe caber en ese hueco
+(<= 50 bytes); con el prefijo por defecto de Termux son 37.
 
 `apply_resolv_patches()` escanea por bloques (sin cargar los ~1 GB en RAM) y
 falla en voz alta si la cadena no aparece, de modo que un cambio de musl en
 upstream se detecta en CI en vez de romper en silencio. El `resolv.conf` se
 genera a partir de `$PREFIX/etc/resolv.conf` / `/system/etc/resolv.conf` o, en su
-defecto, `8.8.8.8`, `8.8.4.4`, `1.1.1.1`; se puede overridear con
-`KIRO_TERMUX_NAMESERVERS` o `KIRO_TERMUX_RESOLV`.
+defecto, `8.8.8.8`, `8.8.4.4`, `1.1.1.1`; se puede overridear al instalar con
+`KIRO_TERMUX_NAMESERVERS`.
 
 ## 4c. La TUI es Bun (y en Android no arranca)
 

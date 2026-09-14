@@ -36,23 +36,23 @@ BINARY_PREFIX = "kiro-cli"
 LIBEXEC_REL = "libexec/kiro-termux"
 CONF_REL = "etc/kiro-termux"
 RECEIPT_REL = "etc/kiro-termux/receipt.json"
-RESOLV_REL = "etc/kiro-termux/resolv.conf"
-CHUNK = 1 << 20
-SCAN_CHUNK = 8 << 20
-HEX64 = re.compile(r"^[0-9a-f]{64}$")
-SUPPORTED_ARCHIVES = ("tar.xz", "tar.zst", "tar.gz", "zip")
 # musl lee /etc/resolv.conf, que en Android no existe (solo hay /system/etc, de
-# solo lectura) y hace fallback a 127.0.0.1:53. Redirigimos esa ruta al fd 9,
-# que el wrapper abre sobre un resolv.conf que si controlamos.
+# solo lectura) y hace fallback a 127.0.0.1:53. Redirigimos esa ruta a un fichero
+# real y corto dentro del prefijo, reescribiendo tambien los literales de musl
+# que le siguen (options/ndots/attempts/timeout) justo hasta "nameserver".
+RESOLV_REL = "etc/r"
 RESOLV_MARKER = b"/etc/resolv.conf\x00"
-RESOLV_REPLACEMENT = b"/proc/self/fd/9\x00"
-RESOLV_FD = 9
+MUSL_NAMESERVER_LITERAL = b"nameserver\x00"
 DEFAULT_NAMESERVERS = ("8.8.8.8", "8.8.4.4", "1.1.1.1")
 # Kiro embebe su runtime Bun (glibc) y el bundle tui.js en kiro-cli-chat. El port
 # sustituye ese blob por un Bun Android (bionic) para que la TUI arranque.
 DEFAULT_BUN_MARKER = b"Extracting bun and tui to: "
 DEFAULT_BUN_INTERP = b"/lib/ld-linux-aarch64.so.1"
 BUN_MEMBER = "bun"
+CHUNK = 1 << 20
+SCAN_CHUNK = 8 << 20
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+SUPPORTED_ARCHIVES = ("tar.xz", "tar.zst", "tar.gz", "zip")
 
 
 def fail(message: str) -> "None":
@@ -402,28 +402,51 @@ def _find_all(path: pathlib.Path, needle: bytes, chunk: int = SCAN_CHUNK) -> lis
     return offsets
 
 
-def patch_resolv_conf(path: pathlib.Path) -> int:
-    """Redirige la ruta de musl /etc/resolv.conf al fd heredado (/proc/self/fd/9)."""
+def patch_resolv_conf(path: pathlib.Path, new_path: pathlib.Path) -> int:
+    """Redirige /etc/resolv.conf de musl a un fichero real corto del prefijo.
+
+    En el binario, la ruta precede a los literales `options`, `ndots:`,
+    `attempts:`, `timeout:` y `nameserver`. Se reescribe la ruta y esos cuatro
+    literales con la ruta nueva, dejando intacto `nameserver` (que musl necesita
+    para parsear el fichero). No se puede usar un fd heredado: el hijo `acp`
+    reutiliza fds bajos y pierde el resolv.conf.
+    """
     offsets = _find_all(path, RESOLV_MARKER)
     if not offsets:
         fail(
             f"{path.name}: no se encontro la ruta {RESOLV_MARKER[:-1].decode()}; "
             "el upstream cambio el enlazado estatico de musl"
         )
-    replacement = RESOLV_REPLACEMENT + b"\x00" * (len(RESOLV_MARKER) - len(RESOLV_REPLACEMENT))
-    with open(path, "r+b") as handle:
+    payload = str(new_path).encode()
+    patched = 0
+    with open(path, "rb") as handle:
         for offset in offsets:
             handle.seek(offset)
-            handle.write(replacement)
-    info(f"  [ok] {path.name}: {len(offsets)} ruta(s) resolv.conf -> {RESOLV_REPLACEMENT[:-1].decode()}")
-    return len(offsets)
+            window = handle.read(160)
+            index = window.find(MUSL_NAMESERVER_LITERAL)
+            if index < 0:
+                continue  # contexto nsswitch/glibc, no es el resolvconf de musl
+            if len(payload) + 1 > index:
+                fail(
+                    f"{path.name}: el prefijo es demasiado largo para el parche resolv.conf "
+                    f"(necesita {len(payload)} bytes, caben {index - 1})"
+                )
+            replacement = payload + b"\x00" + b"\x00" * (index - len(payload) - 1)
+            with open(path, "r+b") as writer:
+                writer.seek(offset)
+                writer.write(replacement)
+            patched += 1
+    if not patched:
+        fail(f"{path.name}: no se encontro el resolv.conf de musl (nameserver)")
+    info(f"  [ok] {path.name}: resolv.conf -> {new_path}")
+    return patched
 
 
-def apply_resolv_patches(extracted: dict[str, pathlib.Path], lock: dict) -> dict[str, int]:
+def apply_resolv_patches(extracted: dict[str, pathlib.Path], lock: dict, resolv_path: pathlib.Path) -> dict[str, int]:
     counts: dict[str, int] = {}
     for member in lock["archive_members"]:
         path = extracted[member]
-        counts[pathlib.PurePosixPath(member).name] = patch_resolv_conf(path)
+        counts[pathlib.PurePosixPath(member).name] = patch_resolv_conf(path, resolv_path)
     return counts
 
 
@@ -599,7 +622,6 @@ def write_resolv_conf(prefix: pathlib.Path) -> pathlib.Path:
     servers = resolve_nameservers(prefix)
     lines = ["# generado por kiro-termux: musl no encuentra /etc/resolv.conf en Android"]
     lines += [f"nameserver {server}" for server in servers]
-    lines.append("options timeout:2 attempts:2 ndots:1")
     content = "\n".join(lines) + "\n"
     if not target.is_file() or target.read_text() != content:
         target.write_text(content)
@@ -609,8 +631,8 @@ def write_resolv_conf(prefix: pathlib.Path) -> pathlib.Path:
 def wrapper_script(prefix: pathlib.Path, name: str) -> str:
     prefix_str = str(prefix)
     return f"""#!{prefix_str}/bin/sh
-# Wrapper de kiro-termux para {name}. Inyecta las CAs de Termux y un
-# resolv.conf legible por musl (Android no expone /etc/resolv.conf).
+# Wrapper de kiro-termux para {name}. Inyecta las CAs de Termux; musl lee su
+# resolv.conf desde {prefix_str}/{RESOLV_REL} (parcheado en el binario).
 KIRO_PREFIX='{prefix_str}'
 _name="${{0##*/}}"
 _real="$KIRO_PREFIX/{LIBEXEC_REL}/$_name"
@@ -620,10 +642,6 @@ if [ ! -x "$_real" ]; then
 fi
 : "${{SSL_CERT_FILE:=$KIRO_PREFIX/etc/tls/cert.pem}}"
 export SSL_CERT_FILE
-_resolv="${{KIRO_TERMUX_RESOLV:-$KIRO_PREFIX/{RESOLV_REL}}}"
-if [ -r "$_resolv" ]; then
-    exec {RESOLV_FD}<"$_resolv"
-fi
 exec "$_real" "$@"
 """
 
@@ -773,11 +791,12 @@ def stage_and_validate(args: argparse.Namespace, tmp: pathlib.Path) -> tuple[dic
         extracted = extract_members(archive, kind, lock["archive_members"], work / "extract")
         validate_binaries(extracted, lock)
         info("Parcheando el resolv.conf de musl...")
-        resolv_counts = apply_resolv_patches(extracted, lock)
+        resolv_path = pathlib.Path(args.prefix) / RESOLV_REL
+        resolv_counts = apply_resolv_patches(extracted, lock, resolv_path)
         patches = {
             "resolv_conf": {
                 "marker": RESOLV_MARKER[:-1].decode(),
-                "replacement": RESOLV_REPLACEMENT[:-1].decode(),
+                "replacement": str(resolv_path),
                 "counts": resolv_counts,
             }
         }
@@ -879,7 +898,8 @@ def command_uninstall(args: argparse.Namespace, tmp: pathlib.Path) -> None:
             if target.is_file() or target.is_symlink():
                 target.unlink()
                 info(f"Eliminado {target}")
-    for path in (receipt_path(prefix), prefix / RESOLV_REL, prefix / "lib/kiro-termux/receipt.json"):
+    legacy_resolv = prefix / "etc/kiro-termux/resolv.conf"
+    for path in (receipt_path(prefix), prefix / RESOLV_REL, legacy_resolv, prefix / "lib/kiro-termux/receipt.json"):
         path.unlink(missing_ok=True)
     for directory in (prefix / CONF_REL, libexec, prefix / "lib/kiro-termux"):
         try:
