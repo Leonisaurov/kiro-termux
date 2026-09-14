@@ -38,8 +38,8 @@
     "source_release": "stack-v1.18.11",
     "asset": "bun-1.2.13-android-aarch64.tar.gz",
     "url": "https://github.com/Leonisaurov/opencode-termux/releases/download/stack-v1.18.11/bun-1.2.13-android-aarch64.tar.gz",
-    "sha256": "d0e4e049492bded5d115c4ce4434b9016f559b5f01c61a6ebf2ae2e9b6ddc147",
-    "size": 35625370,
+    "sha256": "a98ef6bbc0126e08d8b9f5629b42f690bb89c2c82291af8556aefb64a570fd1e",
+    "size": 35625400,
     "member": "bun",
     "interpreter": "/system/bin/linker64",
     "target_triple": "aarch64-linux-android24"
