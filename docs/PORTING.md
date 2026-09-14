@@ -64,7 +64,7 @@ $PREFIX/bin/kiro-cli-term
 $PREFIX/libexec/kiro-termux/kiro-cli    binario real (parcheado)
 $PREFIX/libexec/kiro-termux/kiro-cli-chat
 $PREFIX/libexec/kiro-termux/kiro-cli-term
-$PREFIX/etc/kiro-termux/resolv.conf     DNS para musl
+$PREFIX/etc/r                           DNS para musl (ruta corta, parcheada)
 $PREFIX/etc/kiro-termux/receipt.json    recibo
 ```
 
@@ -173,11 +173,15 @@ sin tocar dotfiles ni lanzar asistentes.
 - **Validate**: sintaxis Python/shell, tests unitarios, validacion del lock,
   `upstream.py verify` y `actionlint`.
 - **Build Kiro CLI**: descarga el artefacto fijado, verifica SHA-256 y tamano,
-  extrae solo los tres binarios, valida el ELF estatico, ejecuta
-  `kiro-cli --version` bajo **QEMU aarch64** (`docker/setup-qemu-action`) e
-  instala en un prefijo temporal. Empaqueta `manifest.json` + bundle del
-  instalador y, bajo `workflow_dispatch` con `publish=true`, publica un release.
-- **Sync upstream**: diario, detecta version nueva, refresca el lock y abre PR.
+  extrae solo los tres binarios, valida el ELF estatico, parchea la ruta del
+  resolv.conf de musl, descarga/verifica el Bun Android de `opencode-termux`, lo
+  embebe en `kiro-cli-chat`, ejecuta `kiro-cli --version` bajo **QEMU aarch64**
+  (`docker/setup-qemu-action`), instala en un prefijo temporal, comprueba el
+  sha256/offset del blob embebido y el wrapper instalado, y empaqueta
+  `manifest.json` + bundle. Bajo `workflow_dispatch` con `publish=true` (o tag
+  `kiro-cli-v*`) publica el release; un push normal solo valida.
+- **Sync upstream**: diario, detecta version nueva, refresca el lock y abre PR
+  (preserva `runtime`/`embedded_bun`).
 
 ## 7. Actualizar la version
 
@@ -197,7 +201,15 @@ porque el manifiesto upstream no expone el `BUILD-INFO`.
   `upstream.py update`.
 - `es dinamico (tiene PT_INTERP)`: se eligio por error un artefacto `gnu`; usa el
   lock que apunta a `aarch64-unknown-linux-musl`.
-- `tamano invalido`: descarga truncada; el instalador reanuda por `Range` al
-  reintentar.
+- `tamano invalido` / `runtime Bun: tamano/checksum invalido`: descarga truncada
+  (se reanuda por `Range`) o asset de Bun re-subido en el release de
+  `opencode-termux`; re-pinea size/sha256 en el lock.
+- `error sending request for url (...)` o `dispatch failure` en `/model`/mensajes:
+  el `acp` no encontro resolv.conf (parche DNS). Verifica que existe
+  `$PREFIX/etc/r` y que el binario contiene la ruta; si ves `el prefijo es
+  demasiado largo para el parche resolv.conf`, el prefijo no cabe en el hueco.
+- `No such file or directory (os error 2)` tras el login: el blob del Bun glibc no
+  se sustituyo; reinstala y comprueba `patches.embedded_bun` en el recibo.
+- `no native root CA certificates found!`: falta el wrapper/`SSL_CERT_FILE`.
 - El chat TUI no arranca o muere: revisa RAM disponible; `kiro-cli-chat` es
   grande. Prueba `kiro-cli --classic`.

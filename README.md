@@ -16,7 +16,8 @@ Probado en dispositivo: `kiro-cli --version` -> `kiro-cli 2.21.4`.
 
 - Termux en Android `aarch64` / `arm64-v8a`.
 - Python 3 (`pkg install python`), que ya viene en Termux.
-- **~1.3 GB** libres: ~530 MB de descarga y ~1.0 GB de binarios instalados.
+- **~1.7 GB** libres en el pico de instalacion (~530 MB de Kiro + ~36 MB del Bun
+  Android de descarga, ~1.1 GB instalados).
 - Conexion a internet para la descarga y para el login de Kiro.
 
 ## Instalacion
@@ -55,7 +56,8 @@ El instalador:
    (ver [TUI y Bun](#tui-y-bun)),
 5. instala los binarios reales en `$PREFIX/libexec/kiro-termux/` y deja
    **wrappers** en `$PREFIX/bin/`, y
-6. genera `$PREFIX/etc/kiro-termux/{resolv.conf,receipt.json}`.
+6. genera `$PREFIX/etc/r` (resolv.conf de musl) y
+   `$PREFIX/etc/kiro-termux/receipt.json`.
 
 Todo es transaccional (rollback) y el recibo permite desinstalar.
 
@@ -65,7 +67,7 @@ libc y lanza `kiro-cli setup` (interactivo). Tampoco toca `~/.kiro` ni tus dotfi
 ## Red (DNS y certificados)
 
 Los binarios son musl estatico. En Android eso rompe dos cosas que el port
-resuelve en los wrappers:
+resuelve por separado (CAs en los wrappers, DNS parcheando el binario):
 
 - **Certificados**: `rustls-native-certs` busca `/etc/ssl/certs/...`, que no
   existe. El wrapper exporta `SSL_CERT_FILE=$PREFIX/etc/tls/cert.pem`
