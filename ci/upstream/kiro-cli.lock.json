@@ -4,7 +4,7 @@
   "vendor": "Amazon Web Services",
   "homepage": "https://kiro.dev/cli/",
   "channel": "stable",
-  "version": "2.21.4",
+  "version": "2.26.1",
   "base_url": "https://prod.download.cli.kiro.dev/stable",
   "platform": {
     "os": "linux",
@@ -15,9 +15,8 @@
     "android_abi": "arm64-v8a"
   },
   "build": {
-    "date": "2026-09-11T12:48:26.370879+00:00",
-    "hash": "57c33e903958a4731d1eaaa8353ad807badbe7d7",
-    "target_triple": "aarch64-unknown-linux-musl"
+    "target_triple": "aarch64-unknown-linux-musl",
+    "synced_at": "2026-10-01T13:15:02+00:00"
   },
   "executables": [
     "kiro-cli",
@@ -50,25 +49,25 @@
     "required_binary": "kiro-cli-chat"
   },
   "artifacts": {
-    "tar.xz": {
-      "file": "kirocli-aarch64-linux-musl.tar.xz",
-      "sha256": "dc3d1e03ce598f17b33d053bc6d46736b8cebd5cf9c23443c703c4634ee14ca9",
-      "size": 530261308
-    },
-    "tar.zst": {
-      "file": "kirocli-aarch64-linux-musl.tar.zst",
-      "sha256": "a0849c5dba1867f3ee310447ef365f47046fc089eda772e56cabab9431fa2cd7",
-      "size": 549500089
-    },
     "tar.gz": {
       "file": "kirocli-aarch64-linux-musl.tar.gz",
-      "sha256": "6eeefad6f3a2ed978d4147396344c9a7bbcde3c8ee173894ba5c97e7ba470eb8",
-      "size": 610026238
+      "sha256": "2d157937768ef11dea7dbff8068eef8ab823c1ef3b6c7597dddd8e526f0cda5b",
+      "size": 157345642
     },
     "zip": {
       "file": "kirocli-aarch64-linux-musl.zip",
-      "sha256": "958308767edd6f2ded505b4a4467b93878f9a324675e3545627aee51f30c9435",
-      "size": 610033943
+      "sha256": "b3a3a9c5c813889060dfaae51ca4bbc924da98bc31b40f34dc1d4a07422f6151",
+      "size": 157346004
+    },
+    "tar.zst": {
+      "file": "kirocli-aarch64-linux-musl.tar.zst",
+      "sha256": "ae7e89f4572005b6f55d5d2070840e87b454fb847cd7734160312f1f79b3b947",
+      "size": 138989408
+    },
+    "tar.xz": {
+      "file": "kirocli-aarch64-linux-musl.tar.xz",
+      "sha256": "ab4af9fb65b9f2003f5e063a9b6c49f7e2db594b53eaa08bfc3e82909e9c2fcd",
+      "size": 132719072
     }
   }
 }
