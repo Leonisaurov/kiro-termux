@@ -4,7 +4,7 @@
   "vendor": "Amazon Web Services",
   "homepage": "https://kiro.dev/cli/",
   "channel": "stable",
-  "version": "2.21.4",
+  "version": "2.31.1",
   "base_url": "https://prod.download.cli.kiro.dev/stable",
   "platform": {
     "os": "linux",
@@ -15,9 +15,8 @@
     "android_abi": "arm64-v8a"
   },
   "build": {
-    "date": "2026-09-11T12:48:26.370879+00:00",
-    "hash": "57c33e903958a4731d1eaaa8353ad807badbe7d7",
-    "target_triple": "aarch64-unknown-linux-musl"
+    "target_triple": "aarch64-unknown-linux-musl",
+    "synced_at": "2026-10-15T11:29:20+00:00"
   },
   "executables": [
     "kiro-cli",
@@ -52,23 +51,23 @@
   "artifacts": {
     "tar.xz": {
       "file": "kirocli-aarch64-linux-musl.tar.xz",
-      "sha256": "dc3d1e03ce598f17b33d053bc6d46736b8cebd5cf9c23443c703c4634ee14ca9",
-      "size": 530261308
-    },
-    "tar.zst": {
-      "file": "kirocli-aarch64-linux-musl.tar.zst",
-      "sha256": "a0849c5dba1867f3ee310447ef365f47046fc089eda772e56cabab9431fa2cd7",
-      "size": 549500089
+      "sha256": "1657f5994349fa82e2edd5972120ebb40980973106b72d010a8903b2c5d194f0",
+      "size": 134005172
     },
     "tar.gz": {
       "file": "kirocli-aarch64-linux-musl.tar.gz",
-      "sha256": "6eeefad6f3a2ed978d4147396344c9a7bbcde3c8ee173894ba5c97e7ba470eb8",
-      "size": 610026238
+      "sha256": "7e1b74ee1750784f910c23ed3a732efc2cafdc0a7787d49ecd1ad6f1d38fac5f",
+      "size": 158800679
+    },
+    "tar.zst": {
+      "file": "kirocli-aarch64-linux-musl.tar.zst",
+      "sha256": "ca729e5d5f1e7ea019ce151eabc35f29f89d60ae21c554bea0969c02440db817",
+      "size": 140352174
     },
     "zip": {
       "file": "kirocli-aarch64-linux-musl.zip",
-      "sha256": "958308767edd6f2ded505b4a4467b93878f9a324675e3545627aee51f30c9435",
-      "size": 610033943
+      "sha256": "d8b1e47bee2e5950b437aa85b347989d15b5fb41883b70f8c17ee2e361d77406",
+      "size": 158800260
     }
   }
 }
